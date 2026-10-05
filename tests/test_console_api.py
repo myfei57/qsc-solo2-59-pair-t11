@@ -106,6 +106,34 @@ def test_console_actions_and_errors(platform):
         server.stop()
 
 
+def test_drill_ledger_end_to_end(platform):
+    server = ConsoleServer(platform, port=0)
+    base_url = server.start()
+    try:
+        code, registered = _post(base_url, "/api/drill/register-defaults", {})
+        assert code == 200
+        frequencies = {req["frequency"] for req in registered["requirements"]}
+        assert {"quarterly", "half_year"} <= frequencies
+        code, planned = _post(base_url, "/api/drill/plan", {"start": "2025-01-01", "end": "2025-03-31"})
+        assert code == 200
+        assert len(planned["created"]) == 2
+        quarterly = [item for item in planned["created"] if item["frequency"] == "quarterly"][0]
+        code, failed = _post(base_url, "/api/drill/run", {"item_id": quarterly["item_id"], "confirm_dt": 0.5})
+        assert code == 200
+        assert failed["ok"] is False
+        code, gaps = _get(base_url, "/api/drill/gaps?as_of=2025-03-31")
+        assert code == 200
+        assert gaps["open_gap_count"] == 2
+        code, compare = _get(base_url, "/api/drill/compare?frequency=quarterly&anchor=2025-11-20&years=2025")
+        assert code == 200
+        assert compare["years"][0]["rolling_unproven_at_year_end"] == ["2025-12"]
+        code, policy = _get(base_url, "/api/drill/policy")
+        assert code == 200
+        assert policy["selected_calendar"] == "natural"
+    finally:
+        server.stop()
+
+
 def test_console_rejects_bad_numeric_parameter(platform):
     support.bring_online(platform)
     server = ConsoleServer(platform, port=0)

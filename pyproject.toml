@@ -21,6 +21,7 @@ packages = [
     "batterystore.pcs",
     "batterystore.temp",
     "batterystore.fire",
+    "batterystore.drill",
     "batterystore.grid",
     "batterystore.soc",
     "batterystore.balance",

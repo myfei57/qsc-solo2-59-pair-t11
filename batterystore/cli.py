@@ -8,13 +8,16 @@
 ``status``   打印当前状态快照；
 ``config``   打印生效配置；
 ``alerts``   打印按最新编号路由后的告警；
-``reset``    清掉落盘的平台计数。
+``reset``    清掉落盘的平台计数；
+``drill``    消防演练合规台账：口径依据、要求登记、自然周期排期、按计划执行、
+             失败后补救、证据追加与检查前缺口清单。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -171,6 +174,115 @@ def _cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_drill_policy(args: argparse.Namespace) -> int:
+    _dump(_build(args).drill_policy())
+    return 0
+
+
+def _cmd_drill_register_defaults(args: argparse.Namespace) -> int:
+    _dump({"requirements": _build(args).drill_register_defaults()})
+    return 0
+
+
+def _cmd_drill_register(args: argparse.Namespace) -> int:
+    platform = _build(args)
+    _dump(
+        platform.drill_register(
+            code=args.code, title=args.title, frequency=args.frequency, zone=args.zone, basis=args.basis
+        )
+    )
+    return 0
+
+
+def _cmd_drill_plan(args: argparse.Namespace) -> int:
+    platform = _build(args)
+    requirement_id = getattr(args, "requirement_id", None)
+    _dump(platform.drill_plan(args.start, args.end, requirement_id))
+    return 0
+
+
+def _cmd_drill_plans(args: argparse.Namespace) -> int:
+    requirement_id = getattr(args, "requirement_id", None)
+    _dump({"plans": _build(args).drill_plans(requirement_id)})
+    return 0
+
+
+def _cmd_drill_run(args: argparse.Namespace) -> int:
+    platform = _build(args)
+    outcome = platform.drill_run_scheduled(
+        args.item_id,
+        smoke_ppm=args.smoke_ppm,
+        temperature_c=args.temperature_c,
+        confirm_dt=args.confirm_dt,
+    )
+    _dump(outcome)
+    return 0 if outcome["ok"] else 1
+
+
+def _cmd_drill_remediate(args: argparse.Namespace) -> int:
+    platform = _build(args)
+    outcome = platform.drill_run_remediation(
+        args.item_id,
+        smoke_ppm=args.smoke_ppm,
+        temperature_c=args.temperature_c,
+        confirm_dt=args.confirm_dt,
+        note=args.note,
+    )
+    _dump(outcome)
+    return 0 if outcome["ok"] else 1
+
+
+def _cmd_drill_gaps(args: argparse.Namespace) -> int:
+    as_of = getattr(args, "as_of", None)
+    _dump(_build(args).drill_gaps(as_of))
+    return 0
+
+
+def _cmd_drill_report(args: argparse.Namespace) -> int:
+    as_of = getattr(args, "as_of", None)
+    _dump(_build(args).drill_report(as_of))
+    return 0
+
+
+def _cmd_drill_runs(args: argparse.Namespace) -> int:
+    _dump({"runs": _build(args).drill_runs()})
+    return 0
+
+
+def _cmd_drill_item(args: argparse.Namespace) -> int:
+    _dump(_build(args).drill_item(args.item_id))
+    return 0
+
+
+def _cmd_drill_evidence(args: argparse.Namespace) -> int:
+    platform = _build(args)
+    with open(args.file, "rb") as handle:
+        data = handle.read()
+    _dump(
+        platform.drill_attach_evidence(
+            args.run_id,
+            data,
+            filename=args.filename or os.path.basename(args.file),
+            content_type=args.content_type,
+            note=args.note,
+        )
+    )
+    return 0
+
+
+def _cmd_drill_compare(args: argparse.Namespace) -> int:
+    platform = _build(args)
+    years = [int(part) for part in args.years.split(",") if part]
+    _dump(platform.drill_compare_calendars(args.frequency, args.anchor, years))
+    return 0
+
+
+def _cmd_drill_current(args: argparse.Namespace) -> int:
+    _dump(_build(args).drill_current_period(args.frequency))
+    return 0
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构造命令行解析器。"""
 
@@ -212,6 +324,81 @@ def build_parser() -> argparse.ArgumentParser:
 
     reset = sub.add_parser("reset", help="清掉落盘的平台计数", parents=[common])
     reset.set_defaults(func=_cmd_reset)
+
+    drill = sub.add_parser("drill", help="消防演练合规台账", parents=[common])
+    drill_sub = drill.add_subparsers(dest="drill_command", required=True)
+
+    drill_policy = drill_sub.add_parser("policy", help="查看排期口径与合规依据", parents=[common])
+    drill_policy.set_defaults(func=_cmd_drill_policy)
+
+    drill_defaults = drill_sub.add_parser("register-defaults", help="登记默认两档周期要求", parents=[common])
+    drill_defaults.set_defaults(func=_cmd_drill_register_defaults)
+
+    drill_register = drill_sub.add_parser("register", help="登记一档周期要求", parents=[common])
+    drill_register.add_argument("--code", required=True)
+    drill_register.add_argument("--title", required=True)
+    drill_register.add_argument("--frequency", required=True, choices=("monthly", "quarterly", "half_year", "yearly"))
+    drill_register.add_argument("--zone", default="Z1")
+    drill_register.add_argument("--basis", default="")
+    drill_register.set_defaults(func=_cmd_drill_register)
+
+    drill_plan = drill_sub.add_parser("plan", help="按自然周期签发计划", parents=[common])
+    drill_plan.add_argument("--start", required=True, help="起始日期 YYYY-MM-DD")
+    drill_plan.add_argument("--end", required=True, help="结束日期 YYYY-MM-DD")
+    drill_plan.add_argument("--requirement-id", default=argparse.SUPPRESS)
+    drill_plan.set_defaults(func=_cmd_drill_plan)
+
+    drill_plans = drill_sub.add_parser("plans", help="列出计划与执行记录", parents=[common])
+    drill_plans.add_argument("--requirement-id", default=argparse.SUPPRESS)
+    drill_plans.set_defaults(func=_cmd_drill_plans)
+
+    drill_run = drill_sub.add_parser("run", help="按原始计划执行一次联动演练", parents=[common])
+    drill_run.add_argument("item_id")
+    drill_run.add_argument("--smoke-ppm", type=float, default=1500.0, dest="smoke_ppm")
+    drill_run.add_argument("--temperature-c", type=float, default=30.0, dest="temperature_c")
+    drill_run.add_argument("--confirm-dt", type=float, default=5.0, dest="confirm_dt")
+    drill_run.set_defaults(func=_cmd_drill_run)
+
+    drill_remediate = drill_sub.add_parser("remediate", help="对缺口周期追加补救演练", parents=[common])
+    drill_remediate.add_argument("item_id")
+    drill_remediate.add_argument("--smoke-ppm", type=float, default=1500.0, dest="smoke_ppm")
+    drill_remediate.add_argument("--temperature-c", type=float, default=30.0, dest="temperature_c")
+    drill_remediate.add_argument("--confirm-dt", type=float, default=5.0, dest="confirm_dt")
+    drill_remediate.add_argument("--note", default="")
+    drill_remediate.set_defaults(func=_cmd_drill_remediate)
+
+    drill_gaps = drill_sub.add_parser("gaps", help="检查前缺口清单", parents=[common])
+    drill_gaps.add_argument("--as-of", default=argparse.SUPPRESS, help="检查基准日 YYYY-MM-DD")
+    drill_gaps.set_defaults(func=_cmd_drill_gaps)
+
+    drill_report = drill_sub.add_parser("report", help="全量合规评估", parents=[common])
+    drill_report.add_argument("--as-of", default=argparse.SUPPRESS, help="评估基准日 YYYY-MM-DD")
+    drill_report.set_defaults(func=_cmd_drill_report)
+
+    drill_runs = drill_sub.add_parser("runs", help="列出全部执行批次（含失败）", parents=[common])
+    drill_runs.set_defaults(func=_cmd_drill_runs)
+
+    drill_item = drill_sub.add_parser("item", help="查看单条计划项明细", parents=[common])
+    drill_item.add_argument("item_id")
+    drill_item.set_defaults(func=_cmd_drill_item)
+
+    drill_evidence = drill_sub.add_parser("evidence", help="向执行批次追加现场证据文件", parents=[common])
+    drill_evidence.add_argument("run_id")
+    drill_evidence.add_argument("file")
+    drill_evidence.add_argument("--filename")
+    drill_evidence.add_argument("--content-type", default="application/octet-stream", dest="content_type")
+    drill_evidence.add_argument("--note", default="")
+    drill_evidence.set_defaults(func=_cmd_drill_evidence)
+
+    drill_compare = drill_sub.add_parser("compare", help="对照自然周期与滚动口径覆盖月份", parents=[common])
+    drill_compare.add_argument("--frequency", default="quarterly", choices=("monthly", "quarterly", "half_year", "yearly"))
+    drill_compare.add_argument("--anchor", required=True, help="上次实际执行日 YYYY-MM-DD")
+    drill_compare.add_argument("--years", required=True, help="自然年，逗号分隔，如 2025,2026")
+    drill_compare.set_defaults(func=_cmd_drill_compare)
+
+    drill_current = drill_sub.add_parser("current", help="查看当前所属自然检查周期", parents=[common])
+    drill_current.add_argument("--frequency", default="quarterly", choices=("monthly", "quarterly", "half_year", "yearly"))
+    drill_current.set_defaults(func=_cmd_drill_current)
     return parser
 
 

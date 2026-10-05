@@ -95,6 +95,21 @@ class Api:
         add("POST", "/api/fault/clear", self._fault_clear)
         add("POST", "/api/fire/drill", self._drill)
         add("POST", "/api/fire/release", lambda params, body: self._platform.release_fire())
+        add("GET", "/api/drill/policy", lambda params, body: self._platform.drill_policy())
+        add("GET", "/api/drill/requirements", lambda params, body: {"requirements": self._platform.drill_requirements()})
+        add("GET", "/api/drill/plans", self._drill_plans)
+        add("GET", "/api/drill/runs", lambda params, body: {"runs": self._platform.drill_runs()})
+        add("GET", "/api/drill/gaps", self._drill_gaps)
+        add("GET", "/api/drill/report", self._drill_report)
+        add("GET", "/api/drill/compare", self._drill_compare)
+        add("GET", "/api/drill/current", self._drill_current)
+        add("GET", "/api/drill/item/{item_id}", self._drill_item)
+        add("POST", "/api/drill/register-defaults", lambda params, body: {"requirements": self._platform.drill_register_defaults()})
+        add("POST", "/api/drill/register", self._drill_register)
+        add("POST", "/api/drill/plan", self._drill_plan)
+        add("POST", "/api/drill/run", self._drill_run_scheduled)
+        add("POST", "/api/drill/remediate", self._drill_run_remediation)
+        add("POST", "/api/drill/evidence", self._drill_evidence)
         add("POST", "/api/frequency", self._frequency)
         add("POST", "/api/soc", self._soc)
         add("POST", "/api/disturb", self._disturb)
@@ -241,6 +256,81 @@ class Api:
             smoke_ppm=_as_float(body, "smoke_ppm", 1500.0),
             temperature_c=_as_float(body, "temperature_c", 30.0),
             confirm_dt=_as_float(body, "confirm_dt", 5.0),
+        )
+
+    def _drill_plans(self, params: dict, body: dict) -> dict:
+        requirement_id = params.get("requirement_id")
+        return {"plans": self._platform.drill_plans(requirement_id)}
+
+    def _drill_gaps(self, params: dict, body: dict) -> dict:
+        return self._platform.drill_gaps(params.get("as_of"))
+
+    def _drill_report(self, params: dict, body: dict) -> dict:
+        return self._platform.drill_report(params.get("as_of"))
+
+    def _drill_compare(self, params: dict, body: dict) -> dict:
+        frequency = str(params.get("frequency", "quarterly"))
+        anchor = str(params.get("anchor", ""))
+        years_text = str(params.get("years", ""))
+        if not anchor or not years_text:
+            raise StoreError("compare 需要 anchor 与 years 参数", component="console")
+        years = [int(part) for part in years_text.split(",") if part]
+        return self._platform.drill_compare_calendars(frequency, anchor, years)
+
+    def _drill_item(self, params: dict, body: dict) -> dict:
+        return self._platform.drill_item(str(params.get("item_id", "")))
+
+    def _drill_current(self, params: dict, body: dict) -> dict:
+        return self._platform.drill_current_period(str(params.get("frequency", "quarterly")))
+
+    def _drill_register(self, params: dict, body: dict) -> dict:
+        return self._platform.drill_register(
+            code=str(body.get("code", "")),
+            title=str(body.get("title", "")),
+            frequency=str(body.get("frequency", "")),
+            zone=str(body.get("zone", "Z1")),
+            basis=str(body.get("basis", "")),
+        )
+
+    def _drill_plan(self, params: dict, body: dict) -> dict:
+        return self._platform.drill_plan(
+            str(body.get("start", "")),
+            str(body.get("end", "")),
+            body.get("requirement_id"),
+        )
+
+    def _drill_run_scheduled(self, params: dict, body: dict) -> dict:
+        return self._platform.drill_run_scheduled(
+            str(body.get("item_id", "")),
+            smoke_ppm=_as_float(body, "smoke_ppm", 1500.0),
+            temperature_c=_as_float(body, "temperature_c", 30.0),
+            confirm_dt=_as_float(body, "confirm_dt", 5.0),
+        )
+
+    def _drill_run_remediation(self, params: dict, body: dict) -> dict:
+        return self._platform.drill_run_remediation(
+            str(body.get("item_id", "")),
+            smoke_ppm=_as_float(body, "smoke_ppm", 1500.0),
+            temperature_c=_as_float(body, "temperature_c", 30.0),
+            confirm_dt=_as_float(body, "confirm_dt", 5.0),
+            note=str(body.get("note", "")),
+        )
+
+    def _drill_evidence(self, params: dict, body: dict) -> dict:
+        import base64
+
+        run_id = str(body.get("run_id", ""))
+        filename = str(body.get("filename", "evidence.bin"))
+        content_type = str(body.get("content_type", "application/octet-stream"))
+        note = str(body.get("note", ""))
+        try:
+            data = base64.b64decode(str(body.get("data_base64", "")), validate=True)
+        except (ValueError, TypeError) as error:
+            raise StoreError("data_base64 必须是合法 base64", component="console") from error
+        if not data:
+            raise StoreError("证据内容为空", component="console")
+        return self._platform.drill_attach_evidence(
+            run_id, data, filename=filename, content_type=content_type, note=note
         )
 
     def _frequency(self, params: dict, body: dict) -> dict:

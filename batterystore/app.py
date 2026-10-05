@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 
 from .audit.log import AuditLog
@@ -16,6 +17,8 @@ from .balance.balance import Balancer
 from .bms.bms import Bms
 from .clock import Clock, SystemClock
 from .config import StationConfig, config_to_mapping, default_config
+from .drill.evidence import EvidenceVault
+from .drill.program import DrillProgram
 from .errors import StoreError
 from .eventbus import Event, EventBus
 from .fire.fire import FireLinkage
@@ -106,6 +109,13 @@ class Platform:
         self.soc = SocEstimator(self.config.soc, self.bms.calibration)
         self.balancer = Balancer(self.config.balance)
         self.quota = QuotaLedger(self.config.quota)
+
+        self._drill_vault = EvidenceVault(os.path.join(store.root, "drill_evidence"))
+        self.drill = DrillProgram(
+            self.clock,
+            JsonlJournal(store.root, "drill", segment_limit=512),
+            self._drill_vault,
+        )
 
         self._cycles = 0
         self._operations = 0
@@ -483,6 +493,47 @@ class Platform:
             self.bus.publish(Event.of("bms", "bms", "fault_clear", station=self.station, severity="notice", rack_id=key))
             return {"rack_id": key, "cleared": cleared}
 
+    def _execute_suppression(
+        self,
+        *,
+        zone: str,
+        smoke_ppm: float,
+        temperature_c: float,
+        confirm_dt: float,
+        operation: str,
+    ) -> dict:
+        """跑一次真实消防联动编排并写审计；动作失败不计演练完成数。"""
+
+        op_id = self.ids.next()
+        report = suppress(
+            self.fire,
+            self.pcs,
+            self.station,
+            zone=zone,
+            smoke_ppm=smoke_ppm,
+            temperature_c=temperature_c,
+            now=self.clock.now(),
+            confirm_dt=confirm_dt,
+        )
+        summary = self._record_operation(op_id, operation, report)
+        if report["ok"]:
+            self._drills += 1
+            self._persist()
+        return {**report, **summary}
+
+    def _drill_runner(
+        self, *, zone: str, smoke_ppm: float, temperature_c: float, confirm_dt: float
+    ) -> dict:
+        """台账调用的真实联动动作：成功失败都以联动报告为准，不伪造完成。"""
+
+        return self._execute_suppression(
+            zone=zone,
+            smoke_ppm=smoke_ppm,
+            temperature_c=temperature_c,
+            confirm_dt=confirm_dt,
+            operation="fire_suppression",
+        )
+
     def fire_drill(
         self,
         zone: str = DEFAULT_ZONE,
@@ -490,25 +541,140 @@ class Platform:
         temperature_c: float = 30.0,
         confirm_dt: float = 5.0,
     ) -> dict:
-        """消防联动编排：探测 → 开阀 → 确认 → 断 PCS → 审计。"""
+        """消防联动编排（不落演练台账，仅执行联动）：探测 → 开阀 → 确认 → 断 PCS → 审计。"""
 
         with self._lock:
-            op_id = self.ids.next()
-            report = suppress(
-                self.fire,
-                self.pcs,
-                self.station,
+            return self._execute_suppression(
                 zone=zone,
                 smoke_ppm=smoke_ppm,
                 temperature_c=temperature_c,
-                now=self.clock.now(),
+                confirm_dt=confirm_dt,
+                operation="fire_suppression",
+            )
+
+    def drill_register_defaults(self) -> list[dict]:
+        """登记站内两档默认周期要求（半年法规底线 + 季度加严）。"""
+
+        with self._lock:
+            return self.drill.register_default_requirements()
+
+    def drill_register(self, code: str, title: str, frequency: str, zone: str = "Z1", basis: str = "") -> dict:
+        """登记一档自定义周期要求。"""
+
+        with self._lock:
+            return self.drill.register_requirement(code, title, frequency, zone, basis)
+
+    def drill_plan(self, start_iso: str, end_iso: str, requirement_id: str | None = None) -> dict:
+        """按自然周期签发演练计划。"""
+
+        with self._lock:
+            return self.drill.generate_plans(start_iso, end_iso, requirement_id)
+
+    def drill_run_scheduled(
+        self,
+        item_id: str,
+        *,
+        smoke_ppm: float = 1500.0,
+        temperature_c: float = 30.0,
+        confirm_dt: float = 5.0,
+    ) -> dict:
+        """按某条原始计划执行一次现场联动，结果自动留痕。"""
+
+        with self._lock:
+            outcome = self.drill.run_scheduled(
+                item_id,
+                self._drill_runner,
+                smoke_ppm=smoke_ppm,
+                temperature_c=temperature_c,
                 confirm_dt=confirm_dt,
             )
-            summary = self._record_operation(op_id, "fire_suppression", report)
-            if report["ok"]:
-                self._drills += 1
-                self._persist()
-            return {**report, **summary}
+            return {"ok": outcome["run"]["ok"], **{k: v for k, v in outcome.items() if k != "report"}, "report": outcome["report"]}
+
+    def drill_run_remediation(
+        self,
+        item_id: str,
+        *,
+        smoke_ppm: float = 1500.0,
+        temperature_c: float = 30.0,
+        confirm_dt: float = 5.0,
+        note: str = "",
+    ) -> dict:
+        """对同一周期缺口追加补救演练（原计划不动）。"""
+
+        with self._lock:
+            outcome = self.drill.run_remediation(
+                item_id,
+                self._drill_runner,
+                smoke_ppm=smoke_ppm,
+                temperature_c=temperature_c,
+                confirm_dt=confirm_dt,
+                note=note,
+            )
+            return {"ok": outcome["run"]["ok"], **{k: v for k, v in outcome.items() if k != "report"}, "report": outcome["report"]}
+
+    def drill_attach_evidence(
+        self, run_id: str, data: bytes, *, filename: str, content_type: str = "application/octet-stream", note: str = ""
+    ) -> dict:
+        """向执行批次追加现场证据文件。"""
+
+        with self._lock:
+            return self.drill.attach_evidence(
+                run_id, data, filename=filename, content_type=content_type, note=note
+            )
+
+    def drill_gaps(self, as_of_iso: str | None = None) -> dict:
+        """检查前缺口清单。"""
+
+        with self._lock:
+            return self.drill.gaps(as_of_iso)
+
+    def drill_report(self, as_of_iso: str | None = None) -> dict:
+        """全量合规评估（含已闭合周期）。"""
+
+        with self._lock:
+            return self.drill.evaluate(as_of_iso)
+
+    def drill_requirements(self) -> list[dict]:
+        """已登记的周期要求。"""
+
+        with self._lock:
+            return self.drill.requirements()
+
+    def drill_plans(self, requirement_id: str | None = None) -> list[dict]:
+        """演练计划与追加执行记录。"""
+
+        with self._lock:
+            return self.drill.plans(requirement_id)
+
+    def drill_runs(self) -> list[dict]:
+        """全部执行批次（含失败批次）。"""
+
+        with self._lock:
+            return self.drill.runs()
+
+    def drill_item(self, item_id: str) -> dict:
+        """单条计划项明细与评估。"""
+
+        with self._lock:
+            return self.drill.item_detail(item_id)
+
+    def drill_compare_calendars(self, frequency: str, anchor_iso: str, years: list[int]) -> dict:
+        """自然周期与滚动口径跨年覆盖对照。"""
+
+        with self._lock:
+            return self.drill.compare_calendars(frequency, anchor_iso, years)
+
+    def drill_policy(self) -> dict:
+        """排期口径选型与合规依据。"""
+
+        with self._lock:
+            return self.drill.policy()
+
+    def drill_current_period(self, frequency: str) -> dict:
+        """当前时间所属的自然检查周期。"""
+
+        with self._lock:
+            return self.drill.current_periods(frequency)
 
     def release_fire(self) -> dict:
         """复位消防联动与 PCS 跳闸。"""
