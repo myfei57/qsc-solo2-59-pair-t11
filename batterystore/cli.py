@@ -8,7 +8,8 @@
 ``status``   打印当前状态快照；
 ``config``   打印生效配置；
 ``alerts``   打印按最新编号路由后的告警；
-``reset``    清掉落盘的平台计数。
+``reset``    清掉落盘的平台计数；
+``drills``   消防演练合规台账（排期、执行留痕、证据留存、检查前缺口清单）。
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from .app import Platform, build_platform
 from .clock import ManualClock, SystemClock
 from .config import config_to_mapping, default_config, load_config
 from .console.server import ConsoleServer, probe_endpoints
+from .drills.commands import register_drill_parser, run_drill_command
 from .errors import StoreError
 
 DEFAULT_PROBE_PATHS = ("/api/status", "/api/readiness", "/api/topology", "/api/audit", "/api/racks")
@@ -212,6 +214,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     reset = sub.add_parser("reset", help="清掉落盘的平台计数", parents=[common])
     reset.set_defaults(func=_cmd_reset)
+
+    register_drill_parser(sub)
     return parser
 
 
@@ -224,6 +228,8 @@ def main(argv: list[str] | None = None) -> int:
             reconfigure(encoding="utf-8", errors="backslashreplace")
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "command", "") == "drills":
+        return run_drill_command(args)
     try:
         return int(args.func(args))
     except StoreError as error:
